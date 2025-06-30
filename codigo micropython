@@ -1,0 +1,354 @@
+try:
+    import usocket as socket
+except ImportError:
+    import socket
+import network
+from machine import Pin, I2C
+import bme280
+import time
+import umail
+import gc
+
+# pines para encender y apagar dependiendo la temperatura y humedad
+led_grifo = Pin(16, Pin.OUT)  # LED grifo azul 20
+led_ventilador = Pin(17, Pin.OUT)  # LED ventilador amarillo 19
+led_calentador = Pin(18, Pin.OUT)  # LED calentador rojo 17
+led_correcto = Pin(19, Pin.OUT)  # LED correcto verde 16
+
+# recolector de basura para liberar memoria y recursos
+gc.collect()
+
+# Configuración I2C y sensor BME280
+i2c = I2C(0, sda=Pin(0), scl=Pin(1), freq=400000)
+bme = bme280.BME280(i2c=i2c)
+
+# configuración wifi de nombre y contraseña
+ssid = 'wifi'
+password = 'wifiwifi'
+
+# Definir la temperatura maxima y minima
+temperatura_maxima = -100
+temperatura_minima = 100
+
+# Configuración del correo emisor, receptor, contraseña , asunto y nombre
+sender_email = 'esp8266proyecto2024@gmail.com'
+sender_name = 'Pi Pico w'
+sender_app_password = 'ejgr vxkt wjdw ztzz'
+recipient_email = 'aaronlujan204@gmail.com'
+email_subject = 'Datos del sensor de temperatura'
+
+# Conexión a la red wifi con su interfaz de wifi
+station = network.WLAN(network.STA_IF)
+station.active(True)
+station.connect(ssid, password)
+
+# esperar hasta que la interfaz de red esté conectada correctamente
+while not station.isconnected():
+    pass
+
+# Obtener la dirección IP del servidor
+direccion_ip = station.ifconfig()[0]
+
+# confirmar la conexión y mostrar los detalles de la interfaz de red solo cuando este conectado al ordenador
+print('Conexión establecida')
+print(station.ifconfig())
+
+# Inicializar las variables de temperatura y humedad
+temp = 5.0
+humedad = 21.0
+ultimo_envio_max_temp = 0  # Inici
+ultimo_envio_temp_alta = 0  # Inicia
+ultimo_envio_temp_baja = 0  # Inicia
+ultimo_envio_max_humedad = 0 # Inicia
+ultimo_envio_m_humedad = 0 # Inicia
+ultimo_envio = time.time()
+ultima_lectura = time.time()
+
+# alamacenaje de las ultimas lecturas del sensor
+lecturas = []
+
+# lectura de valores de los sensores
+def leer_sensor():
+    global temp, humedad, temperatura_maxima, temperatura_minima, lecturas
+    lectura = bme.values  # Obtener los valores del sensor
+    temp = float(lectura[0][:-1])  # Temperatura (eliminar el último carácter 'C' y convertir a float)
+    humedad = float(lectura[2][:-1])  # Humedad (eliminar el último carácter '%' y convertir a float)
+    
+    # actualizar temperaturas mínimas y máximas
+    if temp > temperatura_maxima:
+        temperatura_maxima = temp
+    if temp < temperatura_minima:
+        temperatura_minima = temp
+    
+    # obtener fecha y hora actual para el registro de lecturas
+    tiempo_actual = time.localtime()
+    formato_tiempo = "{}-{:02d}-{:02d} {:02d}:{:02d}:{:02d}".format(tiempo_actual[0], tiempo_actual[1], tiempo_actual[2], tiempo_actual[3], tiempo_actual[4], tiempo_actual[5])
+    
+    # agregar la nueva lectura a la lista de lecturas
+    lecturas.append((formato_tiempo, temp, humedad, temperatura_minima, temperatura_maxima))
+    
+    # mantener solo las últimas seis lecturas
+    if len(lecturas) > 6:
+        lecturas.pop(0)
+        
+        
+    #ultimo_envio_max_temp = 0  # valor 0 para enviar un primer correo y luego necesitar espera 10 minutos
+
+# función para encender el ventilador si la temperatura es alta
+def max_temp():
+    try:
+        # Configurar los LEDs
+        led_correcto.value(0)  # se apaga el led verde
+        led_ventilador.value(1)  # se enciende el amarillo
+        led_calentador.value(0)  # se apaga el rojo
+        print("Temperatura máxima alcanzada. Correo enviado.")
+        gc.collect()
+    except Exception as e:
+        print("Error en max_temp:", e)
+
+# función para apagar el ventilador y encender el calentador si la temperatura es baja
+def min_temp():
+    try:
+        led_correcto.value(0)
+        led_ventilador.value(0)
+        led_calentador.value(1)
+        print("Temperatura mínima alcanzada")
+    except Exception as e:
+        print("Error en min_temp:", e)
+
+# función para encender el grifo si la humedad es alta
+def max_humedad():
+    try:
+        led_correcto.value(0)
+        led_grifo.value(0)
+        print("Humedad máxima alcanzada")
+    except Exception as e: #si ha algun problema escibe esto
+        print("Error en max_humedad:", e)
+
+# función para apagar el grifo si la humedad es baja
+def min_humedad():
+    try:
+        led_correcto.value(0)
+        led_grifo.value(1)
+        print("Humedad mínima alcanzada")
+    except Exception as e:
+        print("Error en min_humedad:", e)
+        
+
+# función para enviar un correo electrónico con los datos del sensor de temp y hum
+def enviar_correo_max_temp():
+    try:
+        smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True)  # Configuración del servidor SMTP de Gmail
+        smtp.login(sender_email, sender_app_password)  # Iniciar sesión con las credenciales
+        smtp.to(recipient_email)  # Destinatario del correo
+        smtp.write("From:" + sender_name + " <" + sender_email + ">\n")  # Remitente del correo
+        smtp.write("Subject:" + email_subject + "\n\n")  # Asunto del correo
+        smtp.write("Temperatura actual maxima: " + str(temp) + "C\n")  # Temperatura actual
+        smtp.write("IP del servidor: " + str(direccion_ip) + "\n")  # Dirección IP del servidor
+
+        smtp.send()  # Envío del correo
+        print("Correo enviado correctamente")
+    except Exception as e:
+        print("Error al enviar el correo:", e)
+    finally:
+        smtp.quit()  # cerrar la conexión SMTP
+        gc.collect()  #recolectar basura para liberar memoria
+
+def enviar_correo_min_temp():
+    try:
+        smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True)  # Configuración del servidor SMTP de Gmail
+        smtp.login(sender_email, sender_app_password)  # Iniciar sesión con las credenciales
+        smtp.to(recipient_email)  # Destinatario del correo
+        smtp.write("From:" + sender_name + " <" + sender_email + ">\n")  # Remitente del correo
+        smtp.write("Subject:" + email_subject + "\n\n")  # Asunto del correo
+        smtp.write("Temperatura actual maxima: " + str(temp) + "C\n")  # Temperatura actual
+        smtp.write("IP del servidor: " + str(direccion_ip) + "\n")  # Dirección IP del servidor
+
+        smtp.send()  # Envío del correo
+        print("Correo enviado correctamente")
+    except Exception as e:
+        print("Error al enviar el correo:", e)
+    finally:
+        smtp.quit()  # cerrar la conexión SMTP
+        gc.collect()  #recolectar basura para liberar memoria
+
+def enviar_correo_min_humedad():
+    try:
+        smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True)  # Configuración del servidor SMTP de Gmail
+        smtp.login(sender_email, sender_app_password)  # Iniciar sesión con las credenciales
+        smtp.to(recipient_email)  # Destinatario del correo
+        smtp.write("From:" + sender_name + " <" + sender_email + ">\n")  # Remitente del correo
+        smtp.write("Subject:" + email_subject + "\n\n")  # Asunto del correo
+        smtp.write("Temperatura actual maxima: " + str(temp) + "C\n")  # Temperatura actual
+        smtp.write("IP del servidor: " + str(direccion_ip) + "\n")  # Dirección IP del servidor
+
+        smtp.send()  # Envío del correo
+        print("Correo enviado correctamente")
+    except Exception as e:
+        print("Error al enviar el correo:", e)
+    finally:
+        smtp.quit()  # cerrar la conexión SMTP
+        gc.collect()  #recolectar basura para liberar memoria
+
+def enviar_correo_max_humedad():
+    try:
+        smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True)  # Configuración del servidor SMTP de Gmail
+        smtp.login(sender_email, sender_app_password)  # Iniciar sesión con las credenciales
+        smtp.to(recipient_email)  # Destinatario del correo
+        smtp.write("From:" + sender_name + " <" + sender_email + ">\n")  # Remitente del correo
+        smtp.write("Subject:" + email_subject + "\n\n")  # Asunto del correo
+        smtp.write("Temperatura actual maxima: " + str(temp) + "C\n")  # Temperatura actual
+        smtp.write("IP del servidor: " + str(direccion_ip) + "\n")  # Dirección IP del servidor
+
+        smtp.send()  # Envío del correo
+        print("Correo enviado correctamente")
+    except Exception as e:
+        print("Error al enviar el correo:", e)
+    finally:
+        smtp.quit()  # cerrar la conexión SMTP
+        gc.collect()  #recolectar basura para liberar memoria
+
+
+# función para enviar un correo electrónico con los datos del sensor
+def enviar_correo():
+    try:
+        smtp = umail.SMTP('smtp.gmail.com', 465, ssl=True)  # Configuración del servidor SMTP de Gmail
+        smtp.login(sender_email, sender_app_password)  # Iniciar sesión con las credenciales
+        smtp.to(recipient_email)  # Destinatario del correo
+        smtp.write("From:" + sender_name + " <" + sender_email + ">\n")  # Remitente del correo
+        smtp.write("Subject:" + email_subject + "\n\n")  # Asunto del correo
+        smtp.write("Temperatura actual: " + str(temp) + "C\n")  # Temperatura actual
+        smtp.write("Humedad actual: " + str(humedad) + "%\n")  # Humedad actual
+        smtp.write("Temperatura mínima registrada: " + str(temperatura_minima) + "C\n")  # Temperatura mínima registrada
+        smtp.write("Temperatura máxima registrada: " + str(temperatura_maxima) + "C\n")  # Temperatura máxima registrada
+        smtp.write("IP del servidor: " + str(direccion_ip) + "\n")  # Dirección IP del servidor
+
+        smtp.send()  # envío del correo
+        print("Correo enviado correctamente")
+    except Exception as e:
+        print("Error al enviar el correo:", e)
+    finally:
+        smtp.quit()  # cerrar la conexión de SMTP
+        gc.collect()  # recolectar basura para liberar memoria
+
+# función para generar y enviar la página web con los datos del sensor
+def generar_pagina_web():
+    html = """<!DOCTYPE HTML><html>
+<head>
+  <meta http-equiv="refresh" content="10">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html { font-family: Arial; display: inline-block; margin: 0px auto; text-align: center; }
+    h2 { font-size: 2.0rem; }
+    p { font-size: 2.0rem; }
+    .units { font-size: 1.2rem; }
+    .bme-labels { font-size: 1.5rem; vertical-align:middle; padding-bottom: 15px; }
+    table { width: 100%; margin: 20px 0; border-collapse: collapse; }
+    th, td { padding: 10px; border: 1px solid #ddd; text-align: center; }
+  </style>
+</head>
+<body>
+  <h2>Proyecto estacion meteorologica</h2>
+  <p><span class="bme-labels">Temperatura:</span> <span>""" + str(temp) + """C</span></p>
+  <p><span class="bme-labels">Humedad:</span> <span>""" + str(humedad) + """%</span></p>
+  <p><span class="bme-labels">Temperatura maxima:</span> <span>""" + str(temperatura_maxima) + """C</span></p>
+  <p><span class="bme-labels">Temperatura minima:</span> <span>""" + str(temperatura_minima) + """C</span></p>
+  <h3>Ultimas lecturas:</h3>
+  <table>
+    <tr>
+      <th>Hora</th>
+      <th>Temperatura</th>
+      <th>Humedad</th>
+      <th>Temperatura minima</th>
+      <th>Temperatura maxima</th>
+    </tr>"""
+    
+    for lectura in lecturas:
+        html += """<tr>
+      <td>""" + lectura[0] + """</td>
+      <td>""" + str(lectura[1]) + """C</td>
+      <td>""" + str(lectura[2]) + """%</td>
+      <td>""" + str(lectura[3]) + """C</td>
+      <td>""" + str(lectura[4]) + """C</td>
+    </tr>"""
+    
+    html += """</table>
+</body>
+</html>"""
+    return html
+
+# Configuración del servidor web en el puerto disponible 80 
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+s.bind(('', 80))
+s.listen(5)
+
+try:
+    while True:  # bucle principal para manejar las solicitudes y las lecturas
+        conexion = None
+        try:
+            conexion, direccion = s.accept()  # aceptar la conexión entrante
+            request = conexion.recv(1024)  # recibr la solicitud del server HTTP
+            
+            # Leer los valores del sensor cada 30 segundos
+            current_time = time.time()
+            if current_time - ultima_lectura > 4:
+                leer_sensor()  # Actualizar los valores de temperatura y humedad
+                ultima_lectura = current_time
+            
+            # envio de correo cada 1 hora
+            if current_time - ultimo_envio > 3600:
+                enviar_correo()  # enviar correo electrónico con los datos actuales de los sensores
+                ultimo_envio = current_time
+            
+            # lectura de sensores y llamada a funciones si se cumplen las condiciones
+            if temp > 40:
+                max_temp()
+                if current_time - ultimo_envio_temp_alta > 60:  # verificar si han pasado 10 minutos
+                    enviar_correo_max_temp()
+                    ultimo_envio_temp_alta = current_time  # actualizar la marca de tiempo del último envío
+
+            if temp < 0:
+                min_temp()
+                if current_time - ultimo_envio_temp_baja > 60:  # verificar si han pasado 10 minutos
+                    enviar_correo_min_temp()
+                    ultimo_envio_temp_baja = current_time  # actualizar la marca de tiempo del último envío
+
+                
+                
+            if humedad > 60:
+                max_humedad()
+                if current_time - ultimo_envio_max_humedad > 60:  # verificar si han pasado 10 minutos
+                    enviar_correo_max_temp()
+                    ultimo_envio_max_humedad = current_time  # actualizar la marca de tiempo del último envío
+
+            if humedad < 20:
+                min_humedad()
+                if current_time - ultimo_envio_min_humedad > 60:  # verificar si han pasado 10 minutos
+                    enviar_correo_max_temp()
+                    ultimo_envio_min_humedad = current_time  # actualizar la marca de tiempo del último envío
+
+            elif 0 < temp < 40 and 20 < humedad < 60:
+                led_correcto.value(1)
+                led_ventilador.value(0)
+                led_calentador.value(0)
+                led_grifo.value(0)
+                print("temperatura y humedad en correctas")
+            
+            # generar y enviar la página web con los datos actuales
+            response = generar_pagina_web()
+            conexion.send(b'HTTP/1.1 200 OK\n')
+            conexion.send(b'Content-Type: text/html\n')
+            conexion.send(b'Connection: close\n\n')
+            conexion.sendall(response.encode())
+        except Exception as e:
+            print("Error al manejar la solicitud:", e)
+        finally:
+            if conexion:
+                conexion.close()
+            gc.collect()  # recolectar basura para liberar memoria
+        time.sleep(1)
+except Exception as e:
+    print("Error en el servidor web:", e)
+finally:
+    s.close()  # cerrar la conexion 
